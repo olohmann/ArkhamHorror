@@ -66,7 +66,7 @@ jobs:
           echo "rule=$RULE" >> "$GITHUB_OUTPUT"
           az postgres flexible-server firewall-rule create \
             --resource-group "$RESOURCE_GROUP" --server-name "$PG_SERVER" \
-            --rule-name "$RULE" \
+            --name "$RULE" \
             --start-ip-address "$RUNNER_IP" --end-ip-address "$RUNNER_IP" \
             --output none
           echo "Opened firewall for $RUNNER_IP (rule $RULE)"
@@ -95,7 +95,7 @@ jobs:
         run: |
           az postgres flexible-server firewall-rule delete \
             --resource-group "$RESOURCE_GROUP" --server-name "$PG_SERVER" \
-            --rule-name "${{ steps.fw.outputs.rule }}" --yes --output none || true
+            --name "${{ steps.fw.outputs.rule }}" --yes --output none || true
 
       - name: Roll Container App to new image
         run: |
