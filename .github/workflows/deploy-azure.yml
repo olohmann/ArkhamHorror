@@ -1,0 +1,111 @@
+# =============================================================================
+# deploy-azure.yml — Deploy the app to Azure Container Apps (MSDN sub).
+#
+# Runs DB migrations against the PostgreSQL Flexible Server, then rolls the
+# Container App to the requested image tag.
+#
+# Auth: a deploy service principal (Contributor on the app resource group)
+# stored as the AZURE_CREDENTIALS secret. DB password in AZ_PG_PASSWORD.
+# =============================================================================
+
+name: Deploy to Azure Container Apps
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag in lohmannio ACR to deploy (e.g. sha-1757946 or v1.0.0)"
+        required: true
+        default: "sha-1757946"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-azure
+  cancel-in-progress: false
+
+env:
+  RESOURCE_GROUP: rg-arkham-horror
+  PG_SERVER: arkham-pg
+  CONTAINER_APP: arkham-web
+  ACR_LOGIN_SERVER: lohmannio.azurecr.io
+  IMAGE_REPO: arkham-horror
+  PG_USER: arkham_pg_user
+  PG_DATABASE: arkham-horror-backend
+
+jobs:
+  deploy:
+    name: Migrate & deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Resolve PostgreSQL FQDN
+        id: pg
+        run: |
+          FQDN=$(az postgres flexible-server show \
+            --resource-group "$RESOURCE_GROUP" --name "$PG_SERVER" \
+            --query fullyQualifiedDomainName -o tsv)
+          echo "fqdn=$FQDN" >> "$GITHUB_OUTPUT"
+          echo "PostgreSQL FQDN: $FQDN"
+
+      - name: Open PostgreSQL firewall for this runner
+        id: fw
+        run: |
+          RUNNER_IP=$(curl -s https://api.ipify.org)
+          RULE="ghruntimer-${GITHUB_RUN_ID}"
+          echo "rule=$RULE" >> "$GITHUB_OUTPUT"
+          az postgres flexible-server firewall-rule create \
+            --resource-group "$RESOURCE_GROUP" --name "$PG_SERVER" \
+            --rule-name "$RULE" \
+            --start-ip-address "$RUNNER_IP" --end-ip-address "$RUNNER_IP" \
+            --output none
+          echo "Opened firewall for $RUNNER_IP (rule $RULE)"
+
+      - name: Run database migrations
+        env:
+          PGHOST: ${{ steps.pg.outputs.fqdn }}
+          PGPASSWORD: ${{ secrets.AZ_PG_PASSWORD }}
+        run: |
+          # Reuse the repo's migrate.sh unchanged, mounted exactly like the
+          # docker-compose `migrate` service expects (/migrations, /migrate.sh).
+          docker run --rm \
+            -v "$PWD/migrations:/migrations:ro" \
+            -v "$PWD/migrate.sh:/migrate.sh:ro" \
+            -e PGHOST="$PGHOST" \
+            -e PGPORT=5432 \
+            -e PGUSER="$PG_USER" \
+            -e PGPASSWORD="$PGPASSWORD" \
+            -e PGDATABASE="$PG_DATABASE" \
+            -e PGSSLMODE=require \
+            -e ARKHAM_FORCE_MIGRATIONS=1 \
+            postgres:16-alpine sh /migrate.sh
+
+      - name: Close PostgreSQL firewall
+        if: always() && steps.fw.outputs.rule != ''
+        run: |
+          az postgres flexible-server firewall-rule delete \
+            --resource-group "$RESOURCE_GROUP" --name "$PG_SERVER" \
+            --rule-name "${{ steps.fw.outputs.rule }}" --yes --output none || true
+
+      - name: Roll Container App to new image
+        run: |
+          IMAGE="${ACR_LOGIN_SERVER}/${IMAGE_REPO}:${{ inputs.image_tag }}"
+          echo "Deploying image: $IMAGE"
+          az containerapp update \
+            --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" \
+            --image "$IMAGE" --output none
+          FQDN=$(az containerapp show \
+            --resource-group "$RESOURCE_GROUP" --name "$CONTAINER_APP" \
+            --query properties.configuration.ingress.fqdn -o tsv)
+          echo "Deployed. App URL: https://$FQDN"
+          echo "### Deployed https://$FQDN" >> "$GITHUB_STEP_SUMMARY"
