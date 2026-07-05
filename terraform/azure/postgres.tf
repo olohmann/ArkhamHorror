@@ -46,6 +46,15 @@ resource "azurerm_postgresql_flexible_server_firewall_rule" "azure_services" {
   end_ip_address   = "0.0.0.0"
 }
 
+# Allow-list PostgreSQL extensions the schema needs. Azure Flexible Server
+# blocks CREATE EXTENSION unless the extension is in azure.extensions.
+# arkham_games migration creates "uuid-ossp".
+resource "azurerm_postgresql_flexible_server_configuration" "azure_extensions" {
+  name      = "azure.extensions"
+  server_id = azurerm_postgresql_flexible_server.arkham.id
+  value     = "UUID-OSSP"
+}
+
 locals {
   database_url = format(
     "postgres://%s:%s@%s:5432/%s?sslmode=require",
