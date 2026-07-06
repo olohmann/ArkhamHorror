@@ -90,23 +90,25 @@ jobs:
             -e ARKHAM_FORCE_MIGRATIONS=1 \
             postgres:16-alpine sh /migrate.sh
 
-      - name: Reconcile schema (setup.sql-only objects)
+      - name: Reconcile schema (setup.sql-only objects + access control)
         env:
           PGHOST: ${{ steps.pg.outputs.fqdn }}
           PGPASSWORD: ${{ secrets.AZ_PG_PASSWORD }}
         run: |
           # Adds objects that live only in setup.sql (users.admin, notifications)
-          # and have no migration file. Idempotent.
+          # and enforces invite-only signup (block-registration trigger). Both
+          # idempotent.
           docker run --rm \
             -v "$PWD/scripts/azure/reconcile-schema.sql:/reconcile.sql:ro" \
+            -v "$PWD/scripts/azure/private-signup.sql:/private-signup.sql:ro" \
             -e PGHOST="$PGHOST" \
             -e PGPORT=5432 \
             -e PGUSER="$PG_USER" \
             -e PGPASSWORD="$PGPASSWORD" \
             -e PGDATABASE="$PG_DATABASE" \
             -e PGSSLMODE=require \
-            postgres:16-alpine \
-            psql -v ON_ERROR_STOP=1 -f /reconcile.sql
+            postgres:16-alpine sh -c \
+            'psql -v ON_ERROR_STOP=1 -f /reconcile.sql && psql -v ON_ERROR_STOP=1 -f /private-signup.sql'
 
       - name: Close PostgreSQL firewall
         if: always() && steps.fw.outputs.rule != ''
